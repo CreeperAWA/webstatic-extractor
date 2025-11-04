@@ -219,11 +219,8 @@ function extractSpine(modules, url = '', w = window) {
         }
         if (v.atlas && v.json) {
             spines.push(va);
-            Object.keys(va).forEach((key) => {
-                // 为每个Spine资源设置模块名
-                va[key].module = name || va[key].module || '';
-                // 保留资源键名作为id
-                va[key].id = key;
+            Object.values(va).forEach((v) => {
+                v.module = name || v.module || '';
             });
             return;
         }
@@ -533,7 +530,6 @@ async function extract(url) {
     console.log('Got Spine Data', spineres);
     const staticres = extractStaticFiles(modules, new URL('.', base).toString());
     console.log('Got Static Files', staticres);
-    
     btn.innerText = 'Preparing resources...';
     const fn = (url.match(/event\/(.*?)\//) || ['', ''])[1].split('-')[0] || Date.now().toString();
     const fileStream = streamSaver.createWriteStream(fn + '.zip');
@@ -541,53 +537,31 @@ async function extract(url) {
         async start(ctrl) {
             btn.innerText = 'Download started...';
             const savedIds = [];
-            const processedSpineResources = new Set(); // 避免重复处理Spine资源
-            
             // save spine json & atlas
             for (const i of Object.keys(spineres.SPINE_MANIFEST)) {
-                const item = spineres.SPINE_MANIFEST[i];
+                const dir = spineres.SPINE_MANIFEST[i].module || 'Spine';
+                // 处理atlas
+                let atlasContent = spineres.SPINE_MANIFEST[i].atlas;
+                if (typeof atlasContent === 'string') {
+                    atlasContent = atlasContent.replace(/\\n/g, '\n');
+                }
+                const atlas = new File([atlasContent], dir + '/' + i + '.atlas', {
+                    type: 'text/plain',
+                });
+                ctrl.enqueue(atlas);
                 
-                // 检查是否为以资源名称为键的对象结构
-                const keys = Object.keys(item);
-                if (keys.length > 0 && item[keys[0]] && item[keys[0]].atlas !== undefined) {
-                    // 这是一个以资源名称为键的对象，跳过处理，因为已经在上面处理过了
-                    continue;
+                // 处理json
+                const j = spineres.SPINE_MANIFEST[i].json;
+                if (typeof j === 'string' && j.indexOf('http') === 0) {
+                    savedIds.push(j);
+                    ctrl.enqueue(await fetchToZip(dir + '/' + i + '.json', j));
                 } else {
-                    // 处理普通结构
-                    const dir = 'Spine'; // 统一放到Spine文件夹
-                    
-                    // 处理atlas
-                    if (item.atlas) {
-                        let atlasContent = item.atlas;
-                        // 如果atlas内容包含转义的换行符，需要将其转换为实际换行
-                        if (typeof atlasContent === 'string') {
-                            atlasContent = atlasContent.replace(/\\n/g, '\n');
-                        }
-                        const atlas = new File([atlasContent], dir + '/' + i + '.atlas', {
-                            type: 'text/plain',
-                        });
-                        ctrl.enqueue(atlas);
-                        processedSpineResources.add(i); // 标记为已处理
-                    }
-                    
-                    // 处理json
-                    if (item.json) {
-                        const j = item.json;
-                        if (typeof j === 'string' && j.indexOf('http') === 0) {
-                            savedIds.push(j);
-                            ctrl.enqueue(await fetchToZip(dir + '/' + i + '.json', j));
-                        } else {
-                            // JSON内容需要格式化为4空格缩进
-                            const jsonContent = JSON.stringify(j, null, 4);
-                            const json = new File([jsonContent], dir + '/' + i + '.json', {
-                                type: 'application/json',
-                            });
-                            ctrl.enqueue(json);
-                        }
-                    }
+                    const json = new File([JSON.stringify(j, null, 4)], dir + '/' + i + '.json', {
+                        type: 'application/json',
+                    });
+                    ctrl.enqueue(json);
                 }
             }
-            
             // save images
             const promises = Object.values(spineres.MAIN_MANIFEST).map((e) => {
                 //skip things in savedIds
@@ -604,25 +578,6 @@ async function extract(url) {
             const staticPromises = staticres.map((e) => {
                 //skip things in savedIds
                 if (savedIds.includes(e.src)) {
-                    return Promise.resolve();
-                }
-                // Skip atlas content as they are handled separately
-                if (e.isAtlasContent) {
-                    // 检查是否已处理过该资源
-                    if (processedSpineResources.has(e.id)) {
-                        return Promise.resolve();
-                    }
-                    // 即使是atlas内容也在这里处理
-                    const dir = 'Spine';
-                    let atlasContent = e.atlasContent;
-                    if (typeof atlasContent === 'string') {
-                        atlasContent = atlasContent.replace(/\\n/g, '\n');
-                    }
-                    const atlas = new File([atlasContent], dir + '/' + e.id + '.atlas', {
-                        type: 'text/plain',
-                    });
-                    ctrl.enqueue(atlas);
-                    processedSpineResources.add(e.id); // 标记为已处理
                     return Promise.resolve();
                 }
                 const dir = '_other_resources';
