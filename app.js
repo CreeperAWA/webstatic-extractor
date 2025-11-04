@@ -541,6 +541,8 @@ async function extract(url) {
         async start(ctrl) {
             btn.innerText = 'Download started...';
             const savedIds = [];
+            const processedSpineResources = new Set(); // 避免重复处理Spine资源
+            
             // save spine json & atlas
             for (const i of Object.keys(spineres.SPINE_MANIFEST)) {
                 const item = spineres.SPINE_MANIFEST[i];
@@ -565,6 +567,7 @@ async function extract(url) {
                             type: 'text/plain',
                         });
                         ctrl.enqueue(atlas);
+                        processedSpineResources.add(i); // 标记为已处理
                     }
                     
                     // 处理json
@@ -605,13 +608,21 @@ async function extract(url) {
                 }
                 // Skip atlas content as they are handled separately
                 if (e.isAtlasContent) {
+                    // 检查是否已处理过该资源
+                    if (processedSpineResources.has(e.id)) {
+                        return Promise.resolve();
+                    }
                     // 即使是atlas内容也在这里处理
                     const dir = 'Spine';
-                    const atlasContent = e.atlasContent.replace(/\\n/g, '\n');
+                    let atlasContent = e.atlasContent;
+                    if (typeof atlasContent === 'string') {
+                        atlasContent = atlasContent.replace(/\\n/g, '\n');
+                    }
                     const atlas = new File([atlasContent], dir + '/' + e.id + '.atlas', {
                         type: 'text/plain',
                     });
                     ctrl.enqueue(atlas);
+                    processedSpineResources.add(e.id); // 标记为已处理
                     return Promise.resolve();
                 }
                 const dir = '_other_resources';
