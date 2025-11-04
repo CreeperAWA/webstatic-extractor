@@ -98,6 +98,10 @@ function extractSpine(modules, url = '', w = window) {
     const atlasModules = [];
     // 新增：识别JSON格式的spine模块
     const jsonModules = [];
+    
+    // 新增：用于存储识别到的Spine资源对象结构
+    const spineResourceObjects = [];
+    
     Object.keys(modules).forEach((k) => {
         const e = modules[k];
         const et = e.toString();
@@ -140,11 +144,54 @@ function extractSpine(modules, url = '', w = window) {
                 console.log(`[extractSpine] Failed to parse JSON module ${k}:`, err);
             }
         }
+        
+        // 新增：识别Spine资源对象结构（如包含agelaiya_、bird等键的对象）
+        // 查找类似 { agelaiya_: { atlas: t(951), json: t(64966) }, ... } 的结构
+        const spineObjectMatch = et.match(/\{[^}]*atlas\s*:\s*t\([^}]*json\s*:\s*t\([^}]*\}/s);
+        if (spineObjectMatch) {
+            try {
+                // 提取整个对象结构
+                const objectStr = spineObjectMatch[0];
+                console.log('[extractSpine] Found Spine resource object structure:', k, objectStr);
+                
+                // 简单解析对象结构以提取资源键和模块ID
+                const atlasMatches = [...objectStr.matchAll(/(\w+)\s*:\s*\{\s*atlas\s*:\s*t\((\d+)\)/g)];
+                const jsonMatches = [...objectStr.matchAll(/(\w+)\s*:\s*\{\s*json\s*:\s*t\((\d+)\)/g)];
+                
+                const resourceMap = {};
+                
+                // 处理atlas资源
+                atlasMatches.forEach(match => {
+                    const key = match[1];
+                    const moduleId = match[2];
+                    if (!resourceMap[key]) resourceMap[key] = {};
+                    resourceMap[key].atlasId = moduleId;
+                });
+                
+                // 处理json资源
+                jsonMatches.forEach(match => {
+                    const key = match[1];
+                    const moduleId = match[2];
+                    if (!resourceMap[key]) resourceMap[key] = {};
+                    resourceMap[key].jsonId = moduleId;
+                });
+                
+                // 存储识别到的Spine资源对象
+                spineResourceObjects.push({
+                    id: k,
+                    resources: resourceMap
+                });
+                
+            } catch (err) {
+                console.log(`[extractSpine] Failed to parse Spine resource object ${k}:`, err);
+            }
+        }
     });
     
     console.log('[extractSpine] Detected Top-Level Modules:', maybeFuncs);
     console.log('[extractSpine] Detected String Atlas Modules:', atlasModules);
     console.log('[extractSpine] Detected JSON Modules:', jsonModules);
+    console.log('[extractSpine] Detected Spine Resource Objects:', spineResourceObjects);
     console.log(modules);
     
     const webpackRequire = createWebpackRequire(modules, url);
@@ -240,6 +287,40 @@ function extractSpine(modules, url = '', w = window) {
                 _moduleId: jsonModule.id
             };
         }
+    });
+    
+    // 新增：处理识别到的Spine资源对象
+    spineResourceObjects.forEach(spineObj => {
+        Object.keys(spineObj.resources).forEach(resourceName => {
+            const resource = spineObj.resources[resourceName];
+            if (!spineres.SPINE_MANIFEST[resourceName]) {
+                spineres.SPINE_MANIFEST[resourceName] = {
+                    id: resourceName,
+                    module: '_spine_object',
+                    _moduleId: spineObj.id
+                };
+            }
+            
+            // 如果找到了对应的atlas模块ID，则关联atlas内容
+            if (resource.atlasId && modules[resource.atlasId]) {
+                try {
+                    const atlasContent = webpackRequire(resource.atlasId);
+                    spineres.SPINE_MANIFEST[resourceName].atlas = atlasContent;
+                } catch (err) {
+                    console.log(`[extractSpine] Failed to require atlas module ${resource.atlasId}:`, err);
+                }
+            }
+            
+            // 如果找到了对应的json模块ID，则关联json内容
+            if (resource.jsonId && modules[resource.jsonId]) {
+                try {
+                    const jsonContent = webpackRequire(resource.jsonId);
+                    spineres.SPINE_MANIFEST[resourceName].json = jsonContent;
+                } catch (err) {
+                    console.log(`[extractSpine] Failed to require json module ${resource.jsonId}:`, err);
+                }
+            }
+        });
     });
     
     console.log('[extractSpine] Final SPINE_MANIFEST:', spineres.SPINE_MANIFEST);
@@ -417,251 +498,141 @@ const dirname = (path) => {
     return a.join('/');
 };
 async function extract(url) {
-    try {
-        btn.innerText = 'Fetching Page...';
-        const { iframe: frame, base } = await loadPageInIframe(url);
-        frame.contentWindow.regeneratorRuntime = regeneratorRuntime;
-        btn.innerText = 'Extracting Data...';
-        let modules = {};
-        if (frame.contentWindow.cachedModules) {
+    btn.innerText = 'Fetching Page...';
+    const { iframe: frame, base } = await loadPageInIframe(url);
+    frame.contentWindow.regeneratorRuntime = regeneratorRuntime;
+    btn.innerText = 'Extracting Data...';
+    let modules = {};
+    if (frame.contentWindow.cachedModules) {
+        modules = {
+            ...frame.contentWindow.loadedModules,
+        };
+        for (const i of frame.contentWindow.cachedModules) {
             modules = {
-                ...frame.contentWindow.loadedModules,
+                ...modules,
+                ...i[1],
             };
-            for (const i of frame.contentWindow.cachedModules) {
-                modules = {
-                    ...modules,
-                    ...i[1],
-                };
-            }
-        } else {
-            const webpackJsonp = frame.contentWindow.webpackJsonp;
-            console.log('found WebpackJsonp', webpackJsonp);
-            const vendors = webpackJsonp.find((e) => e[0].includes('vendors'));
-            if (!vendors) {
-                btn.innerText = 'Load vendors.js faild!';
-                return;
-            }
-            const Index = webpackJsonp.find((e) => e[0].includes('index'));
-            if (!Index) {
-                btn.innerText = 'Load index.js faild!';
-                return;
-            }
-            const Runtime = webpackJsonp.find((e) => e[0].includes('runtime'));
-            modules = { ...vendors[1], ...Index[1], ...(Runtime ? Runtime[1] : {}) };
         }
-        const spineres = extractSpine(modules, new URL('.', base).toString(), frame.contentWindow);
-        console.log('Got Spine Data', spineres);
-        const staticres = extractStaticFiles(modules, new URL('.', base).toString());
-        console.log('Got Static Files', staticres);
-        
-        // 合并atlas资源
-        const allAtlasResources = [];
-        // 收集json资源
-        const allJsonResources = [];
-        
-        // 1. 从spineres.SPINE_MANIFEST获取
-        Object.keys(spineres.SPINE_MANIFEST).forEach(name => {
-            const item = spineres.SPINE_MANIFEST[name];
-            
-            // 检查是否为以资源名称为键的对象结构（如：{ "agelaiya_": { atlas: ..., json: ... } }）
-            const keys = Object.keys(item);
-            if (keys.length > 0 && item[keys[0]] && item[keys[0]].atlas !== undefined) {
-                // 这是一个以资源名称为键的对象
-                keys.forEach(key => {
-                    const resource = item[key];
-                    if (resource) {
-                        // 收集atlas资源
-                        if (resource.atlas && typeof resource.atlas === 'string' && resource.atlas.includes('size:')) {
-                            allAtlasResources.push({
-                                name: key,
-                                content: resource.atlas,
-                                dir: resource.module || '_spine'
-                            });
-                        }
-                        
-                        // 收集JSON资源
-                        if (resource.json) {
-                            allJsonResources.push({
-                                name: key,
-                                content: resource.json,
-                                dir: resource.module || '_spine'
-                            });
-                        }
-                    }
-                });
-            } else {
-                // 处理普通结构
-                if (item.atlas && typeof item.atlas === 'string' && item.atlas.includes('size:')) {
-                    allAtlasResources.push({
-                        name: name,
-                        content: item.atlas,
-                        dir: item.module || '_spine'
-                    });
-                }
+    } else {
+        const webpackJsonp = frame.contentWindow.webpackJsonp;
+        console.log('found WebpackJsonp', webpackJsonp);
+        const vendors = webpackJsonp.find((e) => e[0].includes('vendors'));
+        if (!vendors) {
+            btn.innerText = 'Load vendors.js faild!';
+            return;
+        }
+        const Index = webpackJsonp.find((e) => e[0].includes('index'));
+        if (!Index) {
+            btn.innerText = 'Load index.js faild!';
+            return;
+        }
+        const Runtime = webpackJsonp.find((e) => e[0].includes('runtime'));
+        modules = { ...vendors[1], ...Index[1], ...(Runtime ? Runtime[1] : {}) };
+    }
+    const spineres = extractSpine(modules, new URL('.', base).toString(), frame.contentWindow);
+    console.log('Got Spine Data', spineres);
+    const staticres = extractStaticFiles(modules, new URL('.', base).toString());
+    console.log('Got Static Files', staticres);
+    
+    btn.innerText = 'Preparing resources...';
+    const fn = (url.match(/event\/(.*?)\//) || ['', ''])[1].split('-')[0] || Date.now().toString();
+    const fileStream = streamSaver.createWriteStream(fn + '.zip');
+    const readableZipStream = new ZIP({
+        async start(ctrl) {
+            btn.innerText = 'Download started...';
+            const savedIds = [];
+            // save spine json & atlas
+            for (const i of Object.keys(spineres.SPINE_MANIFEST)) {
+                const item = spineres.SPINE_MANIFEST[i];
                 
-                // 收集JSON资源
-                if (item.json) {
-                    allJsonResources.push({
-                        name: name,
-                        content: item.json,
-                        dir: item.module || '_spine'
-                    });
-                }
-            }
-        });
-        
-        // 2. 从staticres获取
-        staticres.forEach(item => {
-            if (item.isAtlasContent && item.atlasContent) {
-                const atlasName = item.id || `atlas_${item._module}`;
-                allAtlasResources.push({
-                    name: atlasName,
-                    content: item.atlasContent,
-                    dir: '_string_atlas'
-                });
-            }
-        });
-        
-        // 3. 去重atlas资源
-        const uniqueAtlasResources = [];
-        const seenAtlasNames = new Set();
-        allAtlasResources.forEach(atlas => {
-            if (!seenAtlasNames.has(atlas.name)) {
-                seenAtlasNames.add(atlas.name);
-                uniqueAtlasResources.push(atlas);
-            }
-        });
-        
-        // 4. 去重JSON资源
-        const uniqueJsonResources = [];
-        const seenJsonNames = new Set();
-        allJsonResources.forEach(json => {
-            if (!seenJsonNames.has(json.name)) {
-                seenJsonNames.add(json.name);
-                uniqueJsonResources.push(json);
-            }
-        });
-        
-        console.log('[extract] All atlas resources to export:', uniqueAtlasResources);
-        console.log('[extract] All json resources to export:', uniqueJsonResources);
-        
-        btn.innerText = 'Preparing resources...';
-        const fn = (url.match(/event\/(.*?)\//) || ['', ''])[1].split('-')[0] || Date.now().toString();
-        const fileStream = streamSaver.createWriteStream(fn + '.zip');
-        const readableZipStream = new ZIP({
-            async start(ctrl) {
-                btn.innerText = 'Download started...';
-                const savedIds = [];
-                // save spine json & atlas
-                for (const i of Object.keys(spineres.SPINE_MANIFEST)) {
-                    const item = spineres.SPINE_MANIFEST[i];
+                // 检查是否为以资源名称为键的对象结构
+                const keys = Object.keys(item);
+                if (keys.length > 0 && item[keys[0]] && item[keys[0]].atlas !== undefined) {
+                    // 这是一个以资源名称为键的对象，跳过处理，因为已经在上面处理过了
+                    continue;
+                } else {
+                    // 处理普通结构
+                    const dir = 'Spine'; // 统一放到Spine文件夹
                     
-                    // 检查是否为以资源名称为键的对象结构
-                    const keys = Object.keys(item);
-                    if (keys.length > 0 && item[keys[0]] && item[keys[0]].atlas !== undefined) {
-                        // 这是一个以资源名称为键的对象，跳过处理，因为已经在上面处理过了
-                        continue;
-                    } else {
-                        // 处理普通结构
-                        const dir = item.module || '_spine';
-                        
-                        // 跳过已处理的atlas内容
-                        if (item.atlas && typeof item.atlas === 'string' && item.atlas.includes('size:')) {
-                            continue;
+                    // 处理atlas
+                    if (item.atlas) {
+                        let atlasContent = item.atlas;
+                        // 如果atlas内容包含转义的换行符，需要将其转换为实际换行
+                        if (typeof atlasContent === 'string') {
+                            atlasContent = atlasContent.replace(/\\n/g, '\n');
                         }
-                        
-                        // 跳过已处理的json内容
-                        if (item.json) {
-                            continue;
-                        }
-                        
-                        // 处理atlas
-                        if (item.atlas) {
-                            const atlas = new File([item.atlas], dir + '/' + i + '.atlas', {
-                                type: 'text/plain',
+                        const atlas = new File([atlasContent], dir + '/' + i + '.atlas', {
+                            type: 'text/plain',
+                        });
+                        ctrl.enqueue(atlas);
+                    }
+                    
+                    // 处理json
+                    if (item.json) {
+                        const j = item.json;
+                        if (typeof j === 'string' && j.indexOf('http') === 0) {
+                            savedIds.push(j);
+                            ctrl.enqueue(await fetchToZip(dir + '/' + i + '.json', j));
+                        } else {
+                            // JSON内容需要格式化为4空格缩进
+                            const jsonContent = JSON.stringify(j, null, 4);
+                            const json = new File([jsonContent], dir + '/' + i + '.json', {
+                                type: 'application/json',
                             });
-                            ctrl.enqueue(atlas);
-                        }
-                        
-                        // 处理json
-                        if (item.json) {
-                            const j = item.json;
-                            if (typeof j === 'string' && j.indexOf('http') === 0) {
-                                savedIds.push(j);
-                                ctrl.enqueue(await fetchToZip(dir + '/' + i + '.json', j));
-                            } else {
-                                const json = new File([JSON.stringify(j, null, 4)], dir + '/' + i + '.json', {
-                                    type: 'application/json',
-                                });
-                                ctrl.enqueue(json);
-                            }
+                            ctrl.enqueue(json);
                         }
                     }
                 }
-                
-                // 保存atlas文件 - 新增逻辑
-                for (const atlas of uniqueAtlasResources) {
-                    const atlasFile = new File([atlas.content], `${atlas.dir}/${atlas.name}.atlas`, {
+            }
+            
+            // save images
+            const promises = Object.values(spineres.MAIN_MANIFEST).map((e) => {
+                //skip things in savedIds
+                if (savedIds.includes(e.src)) {
+                    return Promise.resolve();
+                }
+                const dir = e.module || '';
+                const fn = dir + '/' + e.id + '.' + extname(e.src);
+                savedIds.push(e.src);
+                return fetchToZip(fn, e.src).then((res) => ctrl.enqueue(res));
+            });
+            // save other static
+            let otherlen = 0;
+            const staticPromises = staticres.map((e) => {
+                //skip things in savedIds
+                if (savedIds.includes(e.src)) {
+                    return Promise.resolve();
+                }
+                // Skip atlas content as they are handled separately
+                if (e.isAtlasContent) {
+                    // 即使是atlas内容也在这里处理
+                    const dir = 'Spine';
+                    const atlasContent = e.atlasContent.replace(/\\n/g, '\n');
+                    const atlas = new File([atlasContent], dir + '/' + e.id + '.atlas', {
                         type: 'text/plain',
                     });
-                    ctrl.enqueue(atlasFile);
-                    console.log(`[ZIP] Added atlas file: ${atlas.dir}/${atlas.name}.atlas`);
+                    ctrl.enqueue(atlas);
+                    return Promise.resolve();
                 }
-                
-                // 保存json文件
-                for (const json of uniqueJsonResources) {
-                    const jsonFile = new File([JSON.stringify(json.content, null, 4)], `${json.dir}/${json.name}.json`, {
-                        type: 'application/json',
-                    });
-                    ctrl.enqueue(jsonFile);
-                    console.log(`[ZIP] Added json file: ${json.dir}/${json.name}.json`);
-                }
-                
-                // save images
-                const promises = Object.values(spineres.MAIN_MANIFEST).map((e) => {
-                    //skip things in savedIds
-                    if (savedIds.includes(e.src)) {
-                        return Promise.resolve();
-                    }
-                    const dir = e.module || '';
-                    const fn = dir + '/' + e.id + '.' + extname(e.src);
-                    savedIds.push(e.src);
-                    return fetchToZip(fn, e.src).then((res) => ctrl.enqueue(res));
-                });
-                // save other static
-                let otherlen = 0;
-                const staticPromises = staticres.map((e) => {
-                    //skip things in savedIds
-                    if (savedIds.includes(e.src)) {
-                        return Promise.resolve();
-                    }
-                    // Skip atlas content as they are handled separately
-                    if (e.isAtlasContent) {
-                        return Promise.resolve();
-                    }
-                    const dir = '_other_resources';
-                    const fn = dir + '/' + e.id + '.' + extname(e.src);
-                    savedIds.push(e.src);
-                    otherlen++;
-                    return fetchToZip(fn, e.src).then((res) => ctrl.enqueue(res));
-                });
-                desc.innerText =
-                    `Extracted ${Object.keys(spineres.SPINE_MANIFEST).length} spine(s), ` +
-                    `${Object.keys(spineres.MAIN_MANIFEST).length} render-related image(s), ` +
-                    `${otherlen} other resource(s)`;
-                await Promise.all(promises.concat(staticPromises));
-                ctrl.close();
-            },
-        });
-        if (window.WritableStream && readableZipStream.pipeTo) {
-            await readableZipStream.pipeTo(fileStream);
-            btn.innerText = 'Done';
-        } else {
-            btn.innerText = 'FileWriter Unsupported!';
-        }
-    } catch (e) {
-        console.error('[extract] ERROR:', e);
-        btn.innerText = 'Error!';
+                const dir = '_other_resources';
+                const fn = dir + '/' + e.id + '.' + extname(e.src);
+                savedIds.push(e.src);
+                otherlen++;
+                return fetchToZip(fn, e.src).then((res) => ctrl.enqueue(res));
+            });
+            desc.innerText =
+                `Extracted ${Object.keys(spineres.SPINE_MANIFEST).length} spine(s), ` +
+                `${Object.keys(spineres.MAIN_MANIFEST).length} render-related image(s), ` +
+                `${otherlen} other resource(s)`;
+            await Promise.all(promises.concat(staticPromises));
+            ctrl.close();
+        },
+    });
+    if (window.WritableStream && readableZipStream.pipeTo) {
+        await readableZipStream.pipeTo(fileStream);
+        btn.innerText = 'Done';
+    } else {
+        btn.innerText = 'FileWriter Unsupported!';
     }
 }
 async function clk() {
