@@ -96,6 +96,8 @@ function extractSpine(modules, url = '', w = window) {
     const maybeFuncs = [];
     // 新增：识别纯字符串atlas模块
     const atlasModules = [];
+    // 新增：识别JSON格式的spine模块
+    const jsonModules = [];
     Object.keys(modules).forEach((k) => {
         const e = modules[k];
         const et = e.toString();
@@ -107,9 +109,8 @@ function extractSpine(modules, url = '', w = window) {
         const isStringExport = et.match(/[a-zA-Z0-9]\.exports\s*=\s*"([^"]*)"/);
         if (isStringExport) {
             const content = isStringExport[1];
-            // 检测是否为Spine atlas格式
-            if (content.includes('size:') && 
-                content.includes('filter:') && 
+            // 检测是否为Spine atlas格式 - 改进的检测逻辑
+            if (content.includes('size:') && content.includes('filter:') && 
                 (content.includes('bounds:') || content.includes('rotate:'))) {
                 atlasModules.push({
                     id: k,
@@ -119,10 +120,31 @@ function extractSpine(modules, url = '', w = window) {
                 });
             }
         }
+        
+        // 新增：识别导出JSON的模块
+        const isJsonExport = et.match(/[a-zA-Z0-9]\.exports\s*=\s*JSON\.parse\('(.*)'\)/);
+        if (isJsonExport) {
+            try {
+                const content = isJsonExport[1];
+                const parsed = JSON.parse(content);
+                // 检测是否为Spine JSON 格式
+                if (parsed.skeleton && (parsed.bones || parsed.slots)) {
+                    jsonModules.push({
+                        id: k,
+                        content: parsed,
+                        // 使用模块ID作为名称，与atlas保持一致
+                        jsonName: k
+                    });
+                }
+            } catch (err) {
+                console.log(`[extractSpine] Failed to parse JSON module ${k}:`, err);
+            }
+        }
     });
     
     console.log('[extractSpine] Detected Top-Level Modules:', maybeFuncs);
     console.log('[extractSpine] Detected String Atlas Modules:', atlasModules);
+    console.log('[extractSpine] Detected JSON Modules:', jsonModules);
     console.log(modules);
     
     const webpackRequire = createWebpackRequire(modules, url);
@@ -150,8 +172,11 @@ function extractSpine(modules, url = '', w = window) {
         }
         if (v.atlas && v.json) {
             spines.push(va);
-            Object.values(va).forEach((v) => {
-                v.module = name || v.module || '';
+            Object.keys(va).forEach((key) => {
+                // 为每个Spine资源设置模块名
+                va[key].module = name || va[key].module || '';
+                // 保留资源键名作为id
+                va[key].id = key;
             });
             return;
         }
@@ -204,6 +229,19 @@ function extractSpine(modules, url = '', w = window) {
         }
     });
     
+    // 新增：将识别到的JSON模块加入结果
+    jsonModules.forEach(jsonModule => {
+        const jsonName = jsonModule.jsonName || `json_${jsonModule.id}`;
+        if (!spineres.SPINE_MANIFEST[jsonName]) {
+            spineres.SPINE_MANIFEST[jsonName] = {
+                json: jsonModule.content,
+                id: jsonName,
+                module: '_json_module',
+                _moduleId: jsonModule.id
+            };
+        }
+    });
+    
     console.log('[extractSpine] Final SPINE_MANIFEST:', spineres.SPINE_MANIFEST);
     return spineres;
 }
@@ -223,8 +261,9 @@ function extractStaticFiles(modules, base) {
             const url = match[2];
             let isAtlasContent = false;
             
-            // 检测是否为atlas内容
-            if (url.includes('size:') && url.includes('filter:')) {
+            // 检测是否为atlas内容 - 改进的检测逻辑
+            if (url.includes('size:') && url.includes('filter:') && 
+                (url.includes('bounds:') || url.includes('rotate:'))) {
                 isAtlasContent = true;
             }
             
@@ -397,19 +436,18 @@ async function extract(url) {
         } else {
             const webpackJsonp = frame.contentWindow.webpackJsonp;
             console.log('found WebpackJsonp', webpackJsonp);
-            // 修改检测顺序，先检查vendor，再检查index，使用相同方式检测
-            const vendors = webpackJsonp.find((e) => e[0].some((name) => name.includes('vendor')));
+            const vendors = webpackJsonp.find((e) => e[0].includes('vendors'));
             if (!vendors) {
-                btn.innerText = 'Load vendor.js failed!';
+                btn.innerText = 'Load vendors.js faild!';
                 return;
             }
-            const index = webpackJsonp.find((e) => e[0].some((name) => name.includes('index')));
-            if (!index) {
-                btn.innerText = 'Load index.js failed!';
+            const Index = webpackJsonp.find((e) => e[0].includes('index'));
+            if (!Index) {
+                btn.innerText = 'Load index.js faild!';
                 return;
             }
             const Runtime = webpackJsonp.find((e) => e[0].includes('runtime'));
-            modules = { ...vendors[1], ...index[1], ...(Runtime ? Runtime[1] : {}) };
+            modules = { ...vendors[1], ...Index[1], ...(Runtime ? Runtime[1] : {}) };
         }
         const spineres = extractSpine(modules, new URL('.', base).toString(), frame.contentWindow);
         console.log('Got Spine Data', spineres);
@@ -418,16 +456,57 @@ async function extract(url) {
         
         // 合并atlas资源
         const allAtlasResources = [];
+        // 收集json资源
+        const allJsonResources = [];
         
         // 1. 从spineres.SPINE_MANIFEST获取
         Object.keys(spineres.SPINE_MANIFEST).forEach(name => {
             const item = spineres.SPINE_MANIFEST[name];
-            if (item.atlas && typeof item.atlas === 'string' && item.atlas.includes('size:')) {
-                allAtlasResources.push({
-                    name: name,
-                    content: item.atlas,
-                    dir: item.module || '_spine'
+            
+            // 检查是否为以资源名称为键的对象结构（如：{ "agelaiya_": { atlas: ..., json: ... } }）
+            const keys = Object.keys(item);
+            if (keys.length > 0 && item[keys[0]] && item[keys[0]].atlas !== undefined) {
+                // 这是一个以资源名称为键的对象
+                keys.forEach(key => {
+                    const resource = item[key];
+                    if (resource) {
+                        // 收集atlas资源
+                        if (resource.atlas && typeof resource.atlas === 'string' && resource.atlas.includes('size:')) {
+                            allAtlasResources.push({
+                                name: key,
+                                content: resource.atlas,
+                                dir: resource.module || '_spine'
+                            });
+                        }
+                        
+                        // 收集JSON资源
+                        if (resource.json) {
+                            allJsonResources.push({
+                                name: key,
+                                content: resource.json,
+                                dir: resource.module || '_spine'
+                            });
+                        }
+                    }
                 });
+            } else {
+                // 处理普通结构
+                if (item.atlas && typeof item.atlas === 'string' && item.atlas.includes('size:')) {
+                    allAtlasResources.push({
+                        name: name,
+                        content: item.atlas,
+                        dir: item.module || '_spine'
+                    });
+                }
+                
+                // 收集JSON资源
+                if (item.json) {
+                    allJsonResources.push({
+                        name: name,
+                        content: item.json,
+                        dir: item.module || '_spine'
+                    });
+                }
             }
         });
         
@@ -443,17 +522,28 @@ async function extract(url) {
             }
         });
         
-        // 3. 去重
+        // 3. 去重atlas资源
         const uniqueAtlasResources = [];
-        const seenNames = new Set();
+        const seenAtlasNames = new Set();
         allAtlasResources.forEach(atlas => {
-            if (!seenNames.has(atlas.name)) {
-                seenNames.add(atlas.name);
+            if (!seenAtlasNames.has(atlas.name)) {
+                seenAtlasNames.add(atlas.name);
                 uniqueAtlasResources.push(atlas);
             }
         });
         
+        // 4. 去重JSON资源
+        const uniqueJsonResources = [];
+        const seenJsonNames = new Set();
+        allJsonResources.forEach(json => {
+            if (!seenJsonNames.has(json.name)) {
+                seenJsonNames.add(json.name);
+                uniqueJsonResources.push(json);
+            }
+        });
+        
         console.log('[extract] All atlas resources to export:', uniqueAtlasResources);
+        console.log('[extract] All json resources to export:', uniqueJsonResources);
         
         btn.innerText = 'Preparing resources...';
         const fn = (url.match(/event\/(.*?)\//) || ['', ''])[1].split('-')[0] || Date.now().toString();
@@ -465,32 +555,46 @@ async function extract(url) {
                 // save spine json & atlas
                 for (const i of Object.keys(spineres.SPINE_MANIFEST)) {
                     const item = spineres.SPINE_MANIFEST[i];
-                    const dir = item.module || '_spine';
                     
-                    // 跳过已处理的atlas内容
-                    if (item.atlas && typeof item.atlas === 'string' && item.atlas.includes('size:')) {
+                    // 检查是否为以资源名称为键的对象结构
+                    const keys = Object.keys(item);
+                    if (keys.length > 0 && item[keys[0]] && item[keys[0]].atlas !== undefined) {
+                        // 这是一个以资源名称为键的对象，跳过处理，因为已经在上面处理过了
                         continue;
-                    }
-                    
-                    // 处理atlas
-                    if (item.atlas) {
-                        const atlas = new File([item.atlas], dir + '/' + i + '.atlas', {
-                            type: 'text/plain',
-                        });
-                        ctrl.enqueue(atlas);
-                    }
-                    
-                    // 处理json
-                    if (item.json) {
-                        const j = item.json;
-                        if (typeof j === 'string' && j.indexOf('http') === 0) {
-                            savedIds.push(j);
-                            ctrl.enqueue(await fetchToZip(dir + '/' + i + '.json', j));
-                        } else {
-                            const json = new File([JSON.stringify(j, null, 4)], dir + '/' + i + '.json', {
-                                type: 'application/json',
+                    } else {
+                        // 处理普通结构
+                        const dir = item.module || '_spine';
+                        
+                        // 跳过已处理的atlas内容
+                        if (item.atlas && typeof item.atlas === 'string' && item.atlas.includes('size:')) {
+                            continue;
+                        }
+                        
+                        // 跳过已处理的json内容
+                        if (item.json) {
+                            continue;
+                        }
+                        
+                        // 处理atlas
+                        if (item.atlas) {
+                            const atlas = new File([item.atlas], dir + '/' + i + '.atlas', {
+                                type: 'text/plain',
                             });
-                            ctrl.enqueue(json);
+                            ctrl.enqueue(atlas);
+                        }
+                        
+                        // 处理json
+                        if (item.json) {
+                            const j = item.json;
+                            if (typeof j === 'string' && j.indexOf('http') === 0) {
+                                savedIds.push(j);
+                                ctrl.enqueue(await fetchToZip(dir + '/' + i + '.json', j));
+                            } else {
+                                const json = new File([JSON.stringify(j, null, 4)], dir + '/' + i + '.json', {
+                                    type: 'application/json',
+                                });
+                                ctrl.enqueue(json);
+                            }
                         }
                     }
                 }
@@ -502,6 +606,15 @@ async function extract(url) {
                     });
                     ctrl.enqueue(atlasFile);
                     console.log(`[ZIP] Added atlas file: ${atlas.dir}/${atlas.name}.atlas`);
+                }
+                
+                // 保存json文件
+                for (const json of uniqueJsonResources) {
+                    const jsonFile = new File([JSON.stringify(json.content, null, 4)], `${json.dir}/${json.name}.json`, {
+                        type: 'application/json',
+                    });
+                    ctrl.enqueue(jsonFile);
+                    console.log(`[ZIP] Added json file: ${json.dir}/${json.name}.json`);
                 }
                 
                 // save images
