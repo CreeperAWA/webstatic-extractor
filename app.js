@@ -539,27 +539,36 @@ async function extract(url) {
             const savedIds = [];
             // save spine json & atlas
             for (const i of Object.keys(spineres.SPINE_MANIFEST)) {
-                const dir = spineres.SPINE_MANIFEST[i].module || 'Spine';
+                const item = spineres.SPINE_MANIFEST[i];
+                const dir = 'Spine'; // 统一存储在Spine目录下
+                
                 // 处理atlas
-                let atlasContent = spineres.SPINE_MANIFEST[i].atlas;
-                if (typeof atlasContent === 'string') {
-                    atlasContent = atlasContent.replace(/\\n/g, '\n');
+                if (item.atlas) {
+                    let atlasContent = item.atlas;
+                    // 如果atlas内容包含转义的换行符，需要将其转换为实际换行
+                    if (typeof atlasContent === 'string') {
+                        atlasContent = atlasContent.replace(/\\n/g, '\n');
+                    }
+                    const atlas = new File([atlasContent], dir + '/' + i + '.atlas', {
+                        type: 'text/plain',
+                    });
+                    ctrl.enqueue(atlas);
                 }
-                const atlas = new File([atlasContent], dir + '/' + i + '.atlas', {
-                    type: 'text/plain',
-                });
-                ctrl.enqueue(atlas);
                 
                 // 处理json
-                const j = spineres.SPINE_MANIFEST[i].json;
-                if (typeof j === 'string' && j.indexOf('http') === 0) {
-                    savedIds.push(j);
-                    ctrl.enqueue(await fetchToZip(dir + '/' + i + '.json', j));
-                } else {
-                    const json = new File([JSON.stringify(j, null, 4)], dir + '/' + i + '.json', {
-                        type: 'application/json',
-                    });
-                    ctrl.enqueue(json);
+                if (item.json) {
+                    const j = item.json;
+                    if (typeof j === 'string' && j.indexOf('http') === 0) {
+                        savedIds.push(j);
+                        ctrl.enqueue(await fetchToZip(dir + '/' + i + '.json', j));
+                    } else {
+                        // JSON内容需要格式化为4空格缩进
+                        const jsonContent = JSON.stringify(j, null, 4);
+                        const json = new File([jsonContent], dir + '/' + i + '.json', {
+                            type: 'application/json',
+                        });
+                        ctrl.enqueue(json);
+                    }
                 }
             }
             // save images
